@@ -26,14 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: "npm"
-
-      - name: Install dependencies (if any)
-        run: |
-          if [ -f package.json ]; then
-            npm ci
-          fi
+          node-version: "22"
 
       - name: Fetch Steam AppID data
         id: fetch
