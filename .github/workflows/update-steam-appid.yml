@@ -73,7 +73,7 @@ jobs:
                     if (!json.response || !json.response.apps) break;
 
                     allApps = allApps.concat(json.response.apps);
-                    hasMore = json.response.have_more;
+                    hasMore = json.response.have_more_results;
                     
                     if (hasMore) {
                         lastAppid = json.response.apps[json.response.apps.length - 1].appid;
