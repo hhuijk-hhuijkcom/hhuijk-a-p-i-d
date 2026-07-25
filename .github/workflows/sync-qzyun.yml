@@ -1,0 +1,93 @@
+name: Sync QZYun Files
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 2 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-qzyun
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download files
+        run: |
+          mkdir -p tmp
+          curl -fL -A "Mozilla/5.0" "https://pan.qzyun.net/f/d/rQ3PF5/appaccesstokens.json" -o tmp/appaccesstokens.json
+          curl -fL -A "Mozilla/5.0" "https://pan.qzyun.net/f/d/6o9ViD/depotkeys.json" -o tmp/depotkeys.json
+
+      - name: Validate JSON
+        run: |
+          python - << 'PY'
+          import json
+          for path in ["tmp/appaccesstokens.json", "tmp/depotkeys.json"]:
+              with open(path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+              if not isinstance(data, dict):
+                  raise SystemExit(f"{path} is not a JSON object")
+          print("JSON validation passed")
+          PY
+
+      - name: Calculate hashes
+        id: hashes
+        run: |
+          new_token_hash=$(sha256sum tmp/appaccesstokens.json | awk '{print $1}')
+          new_depot_hash=$(sha256sum tmp/depotkeys.json | awk '{print $1}')
+
+          old_token_hash=""
+          old_depot_hash=""
+
+          if [ -f appaccesstokens.json ]; then
+            old_token_hash=$(sha256sum appaccesstokens.json | awk '{print $1}')
+          fi
+
+          if [ -f depotkeys.json ]; then
+            old_depot_hash=$(sha256sum depotkeys.json | awk '{print $1}')
+          fi
+
+          echo "new_token_hash=$new_token_hash" >> $GITHUB_OUTPUT
+          echo "new_depot_hash=$new_depot_hash" >> $GITHUB_OUTPUT
+          echo "old_token_hash=$old_token_hash" >> $GITHUB_OUTPUT
+          echo "old_depot_hash=$old_depot_hash" >> $GITHUB_OUTPUT
+
+          changed=false
+          if [ "$new_token_hash" != "$old_token_hash" ] || [ "$new_depot_hash" != "$old_depot_hash" ]; then
+            changed=true
+          fi
+
+          echo "changed=$changed" >> $GITHUB_OUTPUT
+
+      - name: Replace files
+        if: steps.hashes.outputs.changed == 'true'
+        run: |
+          mv tmp/appaccesstokens.json appaccesstokens.json
+          mv tmp/depotkeys.json depotkeys.json
+
+          {
+            echo "appaccesstokens.json=${{ steps.hashes.outputs.new_token_hash }}"
+            echo "depotkeys.json=${{ steps.hashes.outputs.new_depot_hash }}"
+          } > checksums.txt
+
+      - name: Commit and push
+        if: steps.hashes.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add appaccesstokens.json depotkeys.json checksums.txt
+          git commit -m "chore: sync qzyun files"
+          git push
+
+      - name: No changes
+        if: steps.hashes.outputs.changed != 'true'
+        run: echo "No file changes detected"
