@@ -26,22 +26,71 @@ jobs:
       - name: Prepare temp directory
         run: mkdir -p tmp
 
-      - name: Download appaccesstokens.json
+            - name: Download appaccesstokens.json with retry
         id: download_token
         run: |
-          curl -fL \
-            -A "Mozilla/5.0" \
-            "https://pan.qzyun.net/f/d/rQ3PF5/appaccesstokens.json" \
-            -o tmp/appaccesstokens.json
+          set -e
 
-      - name: Download depotkeys.json
+          url="https://pan.qzyun.net/f/d/rQ3PF5/appaccesstokens.json"
+          out="tmp/appaccesstokens.json"
+
+          for i in 1 2 3 4 5 6; do
+            echo "Attempt $i to download appaccesstokens.json"
+
+            if curl -fL --http1.1 \
+              --retry 3 \
+              --retry-all-errors \
+              --retry-delay 3 \
+              --connect-timeout 20 \
+              --max-time 180 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Safari/537.36" \
+              -H "Accept: application/json,text/plain,*/*" \
+              -H "Referer: https://pan.qzyun.net/" \
+              "$url" \
+              -o "$out"; then
+              echo "Download success"
+              exit 0
+            fi
+
+            echo "Attempt $i failed"
+            sleep $((i * 4))
+          done
+
+          echo "appaccesstokens.json download failed after retries"
+          exit 1
+
+            - name: Download depotkeys.json with retry
         id: download_depot
         run: |
-          curl -fL \
-            -A "Mozilla/5.0" \
-            "https://pan.qzyun.net/f/d/6o9ViD/depotkeys.json" \
-            -o tmp/depotkeys.json
+          set -e
 
+          url="https://pan.qzyun.net/f/d/6o9ViD/depotkeys.json"
+          out="tmp/depotkeys.json"
+
+          for i in 1 2 3 4 5 6 7 8; do
+            echo "Attempt $i to download depotkeys.json"
+
+            if curl -fL --http1.1 \
+              --retry 3 \
+              --retry-all-errors \
+              --retry-delay 3 \
+              --connect-timeout 20 \
+              --max-time 300 \
+              -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Safari/537.36" \
+              -H "Accept: application/json,text/plain,*/*" \
+              -H "Referer: https://pan.qzyun.net/" \
+              "$url" \
+              -o "$out"; then
+              echo "Download success"
+              exit 0
+            fi
+
+            echo "Attempt $i failed"
+            sleep $((i * 5))
+          done
+
+          echo "depotkeys.json download failed after retries"
+          exit 1
       - name: Validate JSON files
         id: validate
         run: |
