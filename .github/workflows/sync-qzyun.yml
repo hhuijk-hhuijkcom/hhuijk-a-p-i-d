@@ -16,27 +16,62 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      TZ: Asia/Shanghai
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download files
-        run: |
-          mkdir -p tmp
-          curl -fL -A "Mozilla/5.0" "https://pan.qzyun.net/f/d/rQ3PF5/appaccesstokens.json" -o tmp/appaccesstokens.json
-          curl -fL -A "Mozilla/5.0" "https://pan.qzyun.net/f/d/6o9ViD/depotkeys.json" -o tmp/depotkeys.json
+      - name: Prepare temp directory
+        run: mkdir -p tmp
 
-      - name: Validate JSON
+      - name: Download appaccesstokens.json
+        id: download_token
+        run: |
+          curl -fL \
+            -A "Mozilla/5.0" \
+            "https://pan.qzyun.net/f/d/rQ3PF5/appaccesstokens.json" \
+            -o tmp/appaccesstokens.json
+
+      - name: Download depotkeys.json
+        id: download_depot
+        run: |
+          curl -fL \
+            -A "Mozilla/5.0" \
+            "https://pan.qzyun.net/f/d/6o9ViD/depotkeys.json" \
+            -o tmp/depotkeys.json
+
+      - name: Validate JSON files
+        id: validate
         run: |
           python - << 'PY'
           import json
-          for path in ["tmp/appaccesstokens.json", "tmp/depotkeys.json"]:
+          import os
+
+          files = [
+              "tmp/appaccesstokens.json",
+              "tmp/depotkeys.json",
+          ]
+
+          for path in files:
+              if not os.path.exists(path):
+                  raise SystemExit(f"missing file: {path}")
+
+              size = os.path.getsize(path)
+              if size < 100:
+                  raise SystemExit(f"file too small: {path}, size={size}")
+
               with open(path, "r", encoding="utf-8") as f:
                   data = json.load(f)
+
               if not isinstance(data, dict):
-                  raise SystemExit(f"{path} is not a JSON object")
-          print("JSON validation passed")
+                  raise SystemExit(f"top-level json is not object: {path}")
+
+              if not data:
+                  raise SystemExit(f"json is empty: {path}")
+
+          print("validation passed")
           PY
 
       - name: Calculate hashes
@@ -44,6 +79,9 @@ jobs:
         run: |
           new_token_hash=$(sha256sum tmp/appaccesstokens.json | awk '{print $1}')
           new_depot_hash=$(sha256sum tmp/depotkeys.json | awk '{print $1}')
+
+          token_size=$(wc -c < tmp/appaccesstokens.json | tr -d ' ')
+          depot_size=$(wc -c < tmp/depotkeys.json | tr -d ' ')
 
           old_token_hash=""
           old_depot_hash=""
@@ -56,38 +94,210 @@ jobs:
             old_depot_hash=$(sha256sum depotkeys.json | awk '{print $1}')
           fi
 
-          echo "new_token_hash=$new_token_hash" >> $GITHUB_OUTPUT
-          echo "new_depot_hash=$new_depot_hash" >> $GITHUB_OUTPUT
-          echo "old_token_hash=$old_token_hash" >> $GITHUB_OUTPUT
-          echo "old_depot_hash=$old_depot_hash" >> $GITHUB_OUTPUT
-
           changed=false
           if [ "$new_token_hash" != "$old_token_hash" ] || [ "$new_depot_hash" != "$old_depot_hash" ]; then
             changed=true
           fi
 
-          echo "changed=$changed" >> $GITHUB_OUTPUT
+          echo "new_token_hash=$new_token_hash" >> "$GITHUB_OUTPUT"
+          echo "new_depot_hash=$new_depot_hash" >> "$GITHUB_OUTPUT"
+          echo "old_token_hash=$old_token_hash" >> "$GITHUB_OUTPUT"
+          echo "old_depot_hash=$old_depot_hash" >> "$GITHUB_OUTPUT"
+          echo "token_size=$token_size" >> "$GITHUB_OUTPUT"
+          echo "depot_size=$depot_size" >> "$GITHUB_OUTPUT"
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
 
-      - name: Replace files
+      - name: Replace files only after all checks pass
         if: steps.hashes.outputs.changed == 'true'
         run: |
           mv tmp/appaccesstokens.json appaccesstokens.json
           mv tmp/depotkeys.json depotkeys.json
 
-          {
-            echo "appaccesstokens.json=${{ steps.hashes.outputs.new_token_hash }}"
-            echo "depotkeys.json=${{ steps.hashes.outputs.new_depot_hash }}"
-          } > checksums.txt
+          cat > checksums.txt <<EOF
+          appaccesstokens.json=${{ steps.hashes.outputs.new_token_hash }}
+          depotkeys.json=${{ steps.hashes.outputs.new_depot_hash }}
+          updated_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          source=qzyun
+          EOF
 
       - name: Commit and push
+        id: commit_push
         if: steps.hashes.outputs.changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add appaccesstokens.json depotkeys.json checksums.txt
+
+          if git diff --cached --quiet; then
+            echo "committed=false" >> "$GITHUB_OUTPUT"
+            echo "commit_sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           git commit -m "chore: sync qzyun files"
           git push
 
-      - name: No changes
+          echo "committed=true" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Mark no changes
+        id: no_changes
         if: steps.hashes.outputs.changed != 'true'
-        run: echo "No file changes detected"
+        run: echo "No changes detected"
+
+      - name: Notify success to WeCom
+        if: success()
+        continue-on-error: true
+        env:
+          WEBHOOK_URL: ${{ secrets.QYWX_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          CHANGED: ${{ steps.hashes.outputs.changed }}
+          OLD_TOKEN_HASH: ${{ steps.hashes.outputs.old_token_hash }}
+          NEW_TOKEN_HASH: ${{ steps.hashes.outputs.new_token_hash }}
+          OLD_DEPOT_HASH: ${{ steps.hashes.outputs.old_depot_hash }}
+          NEW_DEPOT_HASH: ${{ steps.hashes.outputs.new_depot_hash }}
+          TOKEN_SIZE: ${{ steps.hashes.outputs.token_size }}
+          DEPOT_SIZE: ${{ steps.hashes.outputs.depot_size }}
+          COMMITTED: ${{ steps.commit_push.outputs.committed }}
+          COMMIT_SHA: ${{ steps.commit_push.outputs.commit_sha }}
+        run: |
+          python - << 'PY'
+          import json
+          import os
+          import urllib.request
+
+          webhook = os.environ["WEBHOOK_URL"]
+          repo = os.environ["REPO"]
+          workflow = os.environ["WORKFLOW"]
+          run_id = os.environ["RUN_ID"]
+          event_name = os.environ["EVENT_NAME"]
+          changed = os.environ.get("CHANGED", "")
+          old_token = os.environ.get("OLD_TOKEN_HASH", "") or "-"
+          new_token = os.environ.get("NEW_TOKEN_HASH", "") or "-"
+          old_depot = os.environ.get("OLD_DEPOT_HASH", "") or "-"
+          new_depot = os.environ.get("NEW_DEPOT_HASH", "") or "-"
+          token_size = os.environ.get("TOKEN_SIZE", "") or "-"
+          depot_size = os.environ.get("DEPOT_SIZE", "") or "-"
+          committed = os.environ.get("COMMITTED", "") or "false"
+          commit_sha = os.environ.get("COMMIT_SHA", "") or "-"
+
+          run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+          if changed == "true":
+              result = "已检测到变更"
+          else:
+              result = "无内容变更"
+
+          if committed == "true":
+              commit_info = f"已提交并推送\\n> commit: `{commit_sha}`"
+          else:
+              commit_info = "未提交"
+
+          content = (
+              "## <font color=\"info\">QZYun 同步成功</font>\\n"
+              f"> 仓库: `{repo}`\\n"
+              f"> 工作流: `{workflow}`\\n"
+              f"> 触发方式: `{event_name}`\\n"
+              f"> 运行详情: [点击查看]({run_url})\\n"
+              f"> 结果: {result}\\n"
+              f"> 提交状态: {commit_info}\\n"
+              "\\n"
+              "### appaccesstokens.json\\n"
+              f"> 旧哈希: `{old_token}`\\n"
+              f"> 新哈希: `{new_token}`\\n"
+              f"> 文件大小: `{token_size}` bytes\\n"
+              "\\n"
+              "### depotkeys.json\\n"
+              f"> 旧哈希: `{old_depot}`\\n"
+              f"> 新哈希: `{new_depot}`\\n"
+              f"> 文件大小: `{depot_size}` bytes"
+          )
+
+          payload = {
+              "msgtype": "markdown",
+              "markdown": {
+                  "content": content
+              }
+          }
+
+          data = json.dumps(payload).encode("utf-8")
+          req = urllib.request.Request(
+              webhook,
+              data=data,
+              headers={"Content-Type": "application/json"}
+          )
+          with urllib.request.urlopen(req, timeout=20) as resp:
+              print(resp.read().decode("utf-8", errors="ignore"))
+          PY
+
+      - name: Notify failure to WeCom
+        if: failure()
+        continue-on-error: true
+        env:
+          WEBHOOK_URL: ${{ secrets.QYWX_WEBHOOK_URL }}
+          REPO: ${{ github.repository }}
+          WORKFLOW: ${{ github.workflow }}
+          RUN_ID: ${{ github.run_id }}
+          EVENT_NAME: ${{ github.event_name }}
+          DOWNLOAD_TOKEN_OUTCOME: ${{ steps.download_token.outcome }}
+          DOWNLOAD_DEPOT_OUTCOME: ${{ steps.download_depot.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          HASHES_OUTCOME: ${{ steps.hashes.outcome }}
+          COMMIT_OUTCOME: ${{ steps.commit_push.outcome }}
+        run: |
+          python - << 'PY'
+          import json
+          import os
+          import urllib.request
+
+          webhook = os.environ["WEBHOOK_URL"]
+          repo = os.environ["REPO"]
+          workflow = os.environ["WORKFLOW"]
+          run_id = os.environ["RUN_ID"]
+          event_name = os.environ["EVENT_NAME"]
+
+          download_token = os.environ.get("DOWNLOAD_TOKEN_OUTCOME", "") or "-"
+          download_depot = os.environ.get("DOWNLOAD_DEPOT_OUTCOME", "") or "-"
+          validate = os.environ.get("VALIDATE_OUTCOME", "") or "-"
+          hashes = os.environ.get("HASHES_OUTCOME", "") or "-"
+          commit_outcome = os.environ.get("COMMIT_OUTCOME", "") or "-"
+
+          run_url = f"https://github.com/{repo}/actions/runs/{run_id}"
+
+          content = (
+              "## <font color=\"warning\">QZYun 同步失败</font>\\n"
+              f"> 仓库: `{repo}`\\n"
+              f"> 工作流: `{workflow}`\\n"
+              f"> 触发方式: `{event_name}`\\n"
+              f"> 运行详情: [点击查看]({run_url})\\n"
+              "\\n"
+              "### 步骤状态\\n"
+              f"> 下载 tokens: `{download_token}`\\n"
+              f"> 下载 depot: `{download_depot}`\\n"
+              f"> JSON 校验: `{validate}`\\n"
+              f"> 哈希计算: `{hashes}`\\n"
+              f"> 提交推送: `{commit_outcome}`\\n"
+              "\\n"
+              "### 保护说明\\n"
+              "> 本次失败没有覆盖 `appaccesstokens.json` 和 `depotkeys.json`。"
+          )
+
+          payload = {
+              "msgtype": "markdown",
+              "markdown": {
+                  "content": content
+              }
+          }
+
+          data = json.dumps(payload).encode("utf-8")
+          req = urllib.request.Request(
+              webhook,
+              data=data,
+              headers={"Content-Type": "application/json"}
+          )
+          with urllib.request.urlopen(req, timeout=20) as resp:
+              print(resp.read().decode("utf-8", errors="ignore"))
+          PY
